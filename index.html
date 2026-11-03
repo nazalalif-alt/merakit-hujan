@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#171717">
+<title>Merakit Hujan — Check-in</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:22px 14px 40px;background:#EEECE5;color:#171717;font-family:Arial,Helvetica,sans-serif}
+.container{max-width:520px;margin:0 auto}
+.header{background:#171717;color:#fff;padding:26px}
+.header h1{font-size:22px;line-height:1.15;letter-spacing:-1px;margin:0;font-weight:900}
+.header p{color:#BDBBB5;font-size:10px;letter-spacing:1px;margin:12px 0 0}
+.panel{background:#fff;padding:22px;border:1px solid #DDDBD4}
+label{display:block;font-size:10px;font-weight:bold;letter-spacing:1px;margin:12px 0 7px}
+input{width:100%;padding:13px;border:1px solid #D8D6CF;border-radius:0;font-size:14px;outline:none}
+button{width:100%;padding:15px;margin-top:14px;border:0;background:#171717;color:#fff;font-size:11px;font-weight:900;letter-spacing:1.2px;cursor:pointer}
+button:disabled{opacity:.5;cursor:not-allowed}
+#reader{width:100%;margin-top:18px;min-height:8px}
+#result{display:none;padding:16px;margin-top:16px;white-space:pre-line;font-size:13px;line-height:1.65;overflow-wrap:anywhere}
+#result.success{display:block;background:#E7F3E9;color:#185D30}
+#result.info{display:block;background:#EEF1F5;color:#26384D}
+#result.error{display:block;background:#F9E9E6;color:#8E2E24}
+#result.info{display:block;background:#EEF1F5;color:#26384D}
+.note{margin-top:18px;font-size:10px;line-height:1.7;color:#77746E}
+.manual{margin-top:25px;border-top:1px solid #ddd;padding-top:16px}
+.small{font-size:10px;color:#77746E;line-height:1.6;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>CHECK-IN / MERAKIT HUJAN</h1>
+    <p>SPECIAL SHOW — 27 NOVEMBER 2026</p>
+  </div>
+  <div class="panel">
+    <label for="staff">NAMA PETUGAS</label>
+    <input id="staff" type="text" placeholder="Nama panitia" autocomplete="name">
+
+    <button id="startBtn" type="button" onclick="startScanner()">START SCANNER</button>
+    <div id="reader"></div>
+    <div id="result" role="status" aria-live="polite"></div>
+    <button id="againBtn" type="button" style="display:none" onclick="startScanner()">SCAN NEXT TICKET</button>
+
+    <div class="note">
+      Buka halaman ini langsung di Chrome Android atau Safari iPhone melalui HTTPS.
+      Jika browser meminta izin kamera, pilih Allow / Izinkan.
+    </div>
+
+    <div class="manual">
+      <label for="manualTicket">VALIDASI MANUAL (CADANGAN)</label>
+      <input id="manualTicket" type="text" placeholder="Masukkan nomor tiket MRH-...">
+      <button type="button" onclick="manualCheckIn()">VALIDATE TICKET ID</button>
+      <div class="small">Gunakan cara ini jika kamera HP tetap tidak tersedia. Validasi tetap dilakukan oleh database yang sama.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// WAJIB: isi dengan URL Web App Apps Script berakhiran /exec.
+const API_URL = 'PASTE_URL_APPS_SCRIPT_DI_SINI';
+// Token diambil dari bagian hash link scanner: .../#TOKEN
+const ACCESS_KEY = decodeURIComponent(window.location.hash.substring(1));
+
+let scanner = null;
+let scannerRunning = false;
+let processing = false;
+
+function showResult(data, type) {
+  const box = document.getElementById('result');
+  box.className = type || (data.ok ? 'success' : 'error');
+  const lines = [data.message || 'Tidak ada informasi.'];
+  if (data.name) lines.push('NAMA: ' + data.name);
+  if (data.ticketId) lines.push('TICKET ID: ' + data.ticketId);
+  if (data.checkinTime) lines.push('WAKTU: ' + data.checkinTime);
+  if (data.detail) lines.push('DETAIL: ' + data.detail);
+  box.textContent = lines.join('\n');
+  box.style.display = 'block';
+}
+
+function explainCameraError(error) {
+  const name = error && error.name ? error.name : 'UnknownError';
+  const message = error && error.message ? error.message : String(error || 'Tidak ada detail');
+  const explanations = {
+    NotAllowedError: 'Akses kamera ditolak atau diblokir. Ubah izin kamera untuk situs GitHub Pages ini menjadi Allow.',
+    PermissionDeniedError: 'Akses kamera ditolak. Ubah izin kamera situs menjadi Allow.',
+    NotFoundError: 'HP/browser tidak menemukan kamera yang tersedia.',
+    DevicesNotFoundError: 'Tidak ada kamera yang terdeteksi oleh browser.',
+    NotReadableError: 'Kamera sedang dipakai aplikasi lain atau diblokir sistem. Tutup aplikasi Kamera/Meet/Zoom lalu coba lagi.',
+    TrackStartError: 'Kamera tidak dapat dimulai. Tutup aplikasi lain yang sedang memakai kamera.',
+    OverconstrainedError: 'Mode kamera yang diminta tidak tersedia. Coba pilih kamera lain atau gunakan kamera depan.',
+    SecurityError: 'Browser memblokir akses kamera. Pastikan URL menggunakan HTTPS dan izin kamera aktif.',
+    TypeError: 'Akses kamera tidak tersedia. Halaman mungkin bukan HTTPS atau browser tidak mendukung getUserMedia.',
+    AbortError: 'Pembukaan kamera dibatalkan oleh browser atau sistem operasi.'
+  };
+  return name + ': ' + (explanations[name] || message) + '\nDetail browser: ' + message;
+}
+
+function validateTicket(ticketId) {
+  if (!ACCESS_KEY) {
+    showResult({message:'Link scanner tidak memiliki token akses. Gunakan link resmi panitia.'}, 'error');
+    processing = false;
+    return;
+  }
+  if (!API_URL || !API_URL.endsWith('/exec')) {
+    showResult({message:'URL API belum benar. Isi API_URL dengan URL Web App Apps Script yang berakhiran /exec.'}, 'error');
+    processing = false;
+    return;
+  }
+
+  const staff = document.getElementById('staff').value.trim() || 'Panitia';
+  const callbackName = 'mrhCallback_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+  const script = document.createElement('script');
+  let finished = false;
+  const timeout = setTimeout(() => finish({ok:false,message:'Server tidak merespons. Periksa URL deployment dan koneksi internet.'}), 20000);
+
+  function finish(result) {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timeout);
+    try { delete window[callbackName]; } catch (_) { window[callbackName] = undefined; }
+    script.remove();
+    showResult(result, result.ok ? 'success' : 'error');
+    document.getElementById('againBtn').style.display = 'block';
+    document.getElementById('startBtn').disabled = false;
+    processing = false;
+  }
+
+  window[callbackName] = finish;
+  const params = new URLSearchParams({
+    action:'checkin', ticket:ticketId, staff:staff,
+    key:ACCESS_KEY, callback:callbackName
+  });
+  script.onerror = () => finish({ok:false,message:'Tidak dapat menghubungi backend Apps Script. Periksa deployment Web App.'});
+  script.src = API_URL + '?' + params.toString();
+  document.body.appendChild(script);
+}
+
+async function stopScanner() {
+  if (scanner && scannerRunning) {
+    try { await scanner.stop(); } catch (_) {}
+    scannerRunning = false;
+  }
+}
+
+async function startScanner() {
+  const startBtn = document.getElementById('startBtn');
+  document.getElementById('result').style.display = 'none';
+  document.getElementById('againBtn').style.display = 'none';
+  startBtn.disabled = true;
+  processing = false;
+
+  try {
+    if (!ACCESS_KEY) throw new Error('Token akses tidak ditemukan pada link. Buka link scanner lengkap dari panitia.');
+    if (!window.isSecureContext) throw new Error('Halaman bukan secure context. Buka alamat HTTPS GitHub Pages, bukan HTTP atau preview file.');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('Browser tidak menyediakan API kamera. Buka link langsung di Chrome (Android) atau Safari (iPhone), bukan browser dalam WhatsApp/Instagram.');
+    }
+    if (!window.Html5Qrcode) throw new Error('Library QR gagal dimuat. Periksa koneksi internet atau CDN diblokir jaringan.');
+
+    showResult({message:'Meminta izin kamera dari browser...'}, 'info');
+
+    // Request camera permission directly from the button gesture.
+    // This helps distinguish permission errors from scanner-library errors.
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: 'environment' } }
+      });
+    } catch (firstError) {
+      // Fallback: ask for any available camera if rear-facing request fails.
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: true
+      });
+    }
+
+    // Release the test stream before html5-qrcode opens the selected camera.
+    stream.getTracks().forEach(track => track.stop());
+
+    // Get cameras after permission so mobile browsers expose camera labels.
+    const cameras = await Html5Qrcode.getCameras();
+    if (!cameras || cameras.length === 0) {
+      throw new Error('Izin diberikan tetapi daftar kamera kosong. Periksa izin kamera sistem HP.');
+    }
+
+    // Prefer a rear/back/environment camera; otherwise use the last available camera.
+    const rearCamera = cameras.find(camera => /back|rear|environment|belakang/i.test(camera.label || ''));
+    const selectedCamera = rearCamera || cameras[cameras.length - 1];
+
+    if (!scanner) scanner = new Html5Qrcode('reader');
+    if (scannerRunning) await stopScanner();
+
+    showResult({message:'Kamera ditemukan: ' + (selectedCamera.label || 'Kamera tersedia') + '. Membuka scanner...'}, 'info');
+
+    await scanner.start(
+      selectedCamera.id,
+      { fps: 10, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0 },
+      onScanSuccess,
+      () => {}
+    );
+
+    scannerRunning = true;
+    document.getElementById('result').style.display = 'none';
+
+  } catch (error) {
+    showResult({
+      ok:false,
+      message:'KAMERA TIDAK BISA DIBUKA',
+      detail:explainCameraError(error)
+    }, 'error');
+    document.getElementById('againBtn').style.display = 'block';
+  } finally {
+    startBtn.disabled = false;
+  }
+}
+
+async function onScanSuccess(decodedText) {
+  if (processing) return;
+  processing = true;
+  await stopScanner();
+  document.getElementById('startBtn').disabled = true;
+  validateTicket(decodedText);
+}
+
+function manualCheckIn() {
+  const ticketId = document.getElementById('manualTicket').value.trim();
+  if (!ticketId) {
+    showResult({message:'Masukkan nomor tiket terlebih dahulu.'}, 'error');
+    return;
+  }
+  processing = true;
+  validateTicket(ticketId);
+}
+</script>
+</body>
+</html>
